@@ -140,7 +140,10 @@ initiating_file_delete(continue, ?STATE{batch=[CurrentFileSetKey | _],
     %% This is because one riak client process is assumed to be used for
     %% blocks in single bag. It's possible to use one riak client process
     %% for multiple block bags, but it introduce complexity of mutation.
-    Args = [BagId, Manifest, self(), CurrentFileSetKey, []],
+    Self = self(),
+    Args = [BagId, Manifest,
+            fun(Msg) -> gen_fsm:sync_send_event(Self, Msg, infinity) end,
+            CurrentFileSetKey, []],
     %% The delete FSM is hard-coded to send a sync event to our registered
     %% name upon terminate(), so we do not have to pass our pid to it
     %% in order to get a reply.
@@ -280,7 +283,7 @@ handle_delete_fsm_reply({ok, {_, _, _, TotalBlocks, TotalBlocks}},
                 current_fileset=UpdFileSet,
                 current_files=RestManifests,
                 block_count=BlockCount+TotalBlocks};
-handle_delete_fsm_reply({ok, {NumDeleted, _TotalBlocks}},
+handle_delete_fsm_reply({ok, {_, _, _, NumDeleted, _TotalBlocks}},
                         ?STATE{current_files=[_CurrentManifest | RestManifests],
                                block_count=BlockCount} = State) ->
     ok = continue(),

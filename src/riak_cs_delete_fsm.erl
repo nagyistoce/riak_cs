@@ -50,7 +50,7 @@
                 uuid :: binary(),
                 manifest :: lfs_manifest(),
                 riak_client :: riak_client(),
-                requester :: pid(),
+                finished_callback :: fun(),
                 %% For GC, Key in GC bucket which this manifest belongs to.
                 %% For active deletion, not used.
                 %% Set only once at init and unchanged. Used only for logs.
@@ -81,7 +81,7 @@ block_deleted(Pid, Response) ->
 %% gen_fsm callbacks
 %% ====================================================================
 
-init([BagId, {UUID, Manifest}, RequesterPid, RequestMeta, _Options]) ->
+init([BagId, {UUID, Manifest}, FinishedCallback, RequestMeta, _Options]) ->
     {Bucket, Key} = Manifest?MANIFEST.bkey,
     {ok, RcPid} = riak_cs_riak_client:checkout(),
     ok = riak_cs_riak_client:set_manifest_bag(RcPid, BagId),
@@ -91,7 +91,7 @@ init([BagId, {UUID, Manifest}, RequesterPid, RequestMeta, _Options]) ->
                    manifest=Manifest,
                    uuid=UUID,
                    riak_client=RcPid,
-                   requester=RequesterPid,
+                   finished_callback=FinishedCallback,
                    request_meta_info=RequestMeta},
     {ok, prepare, State, 0}.
 
@@ -242,10 +242,8 @@ maybe_delete_blocks(State=#state{bucket=Bucket,
                                     delete_blocks_remaining=NewDeleteBlocksRemaining}).
 
 -spec notify_requester(term(), state()) -> term().
-notify_requester(Reason, State) ->
-    gen_fsm:sync_send_event(State#state.requester,
-                            notification_msg(Reason, State),
-                            infinity).
+notify_requester(Reason, State = #state{finished_callback=FinishedCallback}) ->
+    FinishedCallback(notification_msg(Reason, State)).
 
 -spec notification_msg(term(), state()) -> {pid(),
                                             {ok, {non_neg_integer(), non_neg_integer()}} |
@@ -264,6 +262,7 @@ notification_msg(Reason, _State) ->
 -spec manifest_cleanup(atom(), binary(), binary(), binary(), riak_client()) -> ok.
 manifest_cleanup(deleted, Bucket, Key, UUID, RcPid) ->
     {ok, ManiFsmPid} = riak_cs_manifest_fsm:start_link(Bucket, Key, RcPid),
+    lager:info("<<K<<manifesclean up: ~p~p~p", [Bucket, Key, UUID]),
     _ = try
             _ = riak_cs_manifest_fsm:delete_specific_manifest(ManiFsmPid, UUID)
         after

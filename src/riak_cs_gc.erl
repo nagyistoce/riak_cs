@@ -182,9 +182,29 @@ gc_specific_manifests(UUIDsToMark, RiakObject, Bucket, Key, RcPid) ->
 handle_mark_as_pending_delete({ok, RiakObject}, Bucket, Key, UUIDsToMark, RcPid) ->
     Manifests = riak_cs_manifest:manifests_from_riak_object(RiakObject),
     PDManifests = riak_cs_manifest_utils:manifests_to_gc(UUIDsToMark, Manifests),
-    MoveResult = move_manifests_to_gc_bucket(PDManifests, RcPid),
-    PDUUIDs = [UUID || {UUID, _} <- PDManifests],
-    handle_move_result(MoveResult, RiakObject, Bucket, Key, PDUUIDs, RcPid);
+    case riak_cs_config:active_delete_threshold() of
+        Threshold when is_integer(Threshold) andalso Threshold > 0 ->
+            %% hereby delete PDUUIDs smaller than threshold
+            
+            %% We do synchronous delete after it is marked
+            %% pending_delete, to reduce the possibility where
+            %% concurrent requests find active manifest (UUID) and
+            %% go find deleted blocks resulting notfound stuff.
+            %% However, there are still corner cases where
+            %% concurrent requests interleaves between marking
+            %% pending_delete here and deleting blocks, like:
+            %%
+            %% 1. Request A refers to a manifest finding active UUID x
+            %% 2. Request B deletes an object marking active UUID x as pending_delete
+            %% 3. Request B deletes blocks of UUID x according to this synchronous delete -> ok
+            %% 4. Request A refers to blocks pointed by UUID x -> notfound
+            maybe_delete_small_objects(PDManifests, RcPid, Threshold);
+        _ ->
+            MoveResult = move_manifests_to_gc_bucket(PDManifests, RcPid),
+            %%            MoveResult = maybe_move_manifests_to_gc_bucket(PDManifests, RcPid),
+            PDUUIDs = [UUID || {UUID, _} <- PDManifests],
+            handle_move_result(MoveResult, RiakObject, Bucket, Key, PDUUIDs, RcPid)
+    end;
 handle_mark_as_pending_delete({error, _Error}=Error, _Bucket, _Key, _UUIDsToMark, _RcPid) ->
     _ = lager:warning("Failed to mark as pending_delete, reason: ~p", [Error]),
     Error.
@@ -360,6 +380,50 @@ mark_manifests(RiakObject, Bucket, Key, UUIDsToMark, ManiFunction, RcPid) ->
     %% again without having to re-retrieve the object
     {ok, ManifestPbc} = riak_cs_riak_client:manifest_pbc(RcPid),
     riak_cs_pbc:put(ManifestPbc, UpdObj, [return_body], riak_cs_config:put_gckey_timeout()).
+
+maybe_delete_small_objects(Manifests, RcPid, Threshold) ->
+    {ok, BagId} = riak_cs_riak_client:get_manifest_bag(RcPid),
+    Self = self(),
+    FinishedFun = fun(Msg) -> Self ! Msg end,
+    DelFun= fun({UUID, Manifest = ?MANIFEST{state=pending_delete,
+                                            content_length=ContentLength}},
+                Acc0)
+                  when ContentLength < Threshold ->
+                    UUIDManifest = {UUID, Manifest?MANIFEST{state=scheduled_delete}}, %% actually it's not scheduled :P
+                    %% Delete!
+                    lager:info("trying to delete ~p at ~p", [UUIDManifest, BagId]),
+                    Args = [BagId, UUIDManifest, FinishedFun, dummy_gc_key_in_sync_delete, []],
+                    {ok, Pid} = riak_cs_delete_fsm_sup:start_delete_fsm(node(), Args),
+                    Ref = erlang:monitor(process, Pid),
+                    receive
+                        {Pid, {ok, _}} ->
+                            erlang:demonitor(Ref),
+                            Acc0; %% successfully deleted
+                        {error, _} = E ->
+                            erlang:demonitor(Ref),
+                            _ = lager:warning("active deletion failed: ~p", [E]),
+                            [UUID|Acc0];
+                        _Other ->
+                            erlang:demonitor(Ref),
+                            _ = lager:error("error: ~p", [_Other]),
+                            [UUID|Acc0]
+                    end;
+               ({UUID, _M}, Acc0) ->
+                    lager:info("not being deleted: ~p", [{UUID, _M, _M?MANIFEST.state}]),
+                    ContentLength = _M?MANIFEST.content_length,
+                    lager:info("CL <> threshold: ~p, ~p", [ContentLength, Threshold]),
+                    [UUID|Acc0]
+            end,
+    lager:info("booooooo"),
+    {ok, lists:foldl(DelFun, [], Manifests)}.
+    %% false ->
+    %%         DelFun2 = fun() ->
+    %%                           SleepSec = riak_cs_config:active_delete_leeway(),
+    %%                           timer:sleep(SleepSec * 1024),
+    %%                           lists:foldl(DelFun, [], Manifests)
+    %%                   end,
+    %%         spawn(DelFun2)
+    %% end.
 
 %% @doc Copy data for a list of manifests to the
 %% `riak-cs-gc' bucket to schedule them for deletion.

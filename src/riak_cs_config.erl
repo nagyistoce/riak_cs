@@ -62,7 +62,9 @@
          stanchion/0,
          use_2i_for_storage_calc/0,
          detailed_storage_calc/0,
-         quota_modules/0
+         quota_modules/0,
+         active_delete_threshold/0,
+         synchronous_delete/0
         ]).
 
 %% Timeouts hitting Riak
@@ -442,6 +444,25 @@ detailed_storage_calc() ->
 -spec quota_modules() -> [module()].
 quota_modules() ->
     get_env(riak_cs, quota_modules, []).
+
+%% @doc smaller than block size recommended, to avoid multiple DELETE
+%% calls to riak per single manifest deletion.
+-spec active_delete_threshold() -> non_neg_integer().
+active_delete_threshold() ->
+    get_env(riak_cs, active_delete_threshold, 0).
+
+-spec synchronous_delete() -> boolean().
+synchronous_delete() ->
+    get_env(riak_cs, synchronous_delete, false).
+
+%% -spec active_delete_leeway() -> non_neg_integer().
+%% active_delete_leeway() ->
+    %% The purpose of this leeway is to avoid interleaving with
+    %% concurrent GET requests - from when they get active manifest
+    %% and to they get blocks. `get_manifest_timeout' is good
+    %% estimation for maximum of time interval between getting
+    %% manifests and getting blocks.
+    %% get_env(riak_cs, active_delete_leeway, get_manifest_timeout() * 2).
 
 %% ===================================================================
 %% ALL Timeouts hitting Riak

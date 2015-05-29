@@ -291,6 +291,7 @@ get_and_delete(RcPid, UUID, Bucket, Key) ->
         {ok, RiakObject, Manifests} ->
             ResolvedManifests = riak_cs_manifest_resolution:resolve([Manifests]),
             UpdatedManifests = orddict:erase(UUID, ResolvedManifests),
+            lager:info("Delete: ~p => ~p", [ResolvedManifests, UpdatedManifests]),
             case UpdatedManifests of
                 [] ->
                     DeleteTimeout = riak_cs_config:delete_manifest_timeout(),
