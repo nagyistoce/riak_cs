@@ -270,7 +270,7 @@ ok_reply(NextState, NextStateData) ->
 %% Refactor TODO:
 %%   1. delete_fsm_pid=undefined is desirable in both ok & error cases?
 %%   2. It's correct to *not* change pause_state?
-handle_delete_fsm_reply({ok, {TotalBlocks, TotalBlocks}},
+handle_delete_fsm_reply({ok, {_, _, _, TotalBlocks, TotalBlocks}},
                         ?STATE{current_files=[CurrentManifest | RestManifests],
                                current_fileset=FileSet,
                                block_count=BlockCount} = State) ->

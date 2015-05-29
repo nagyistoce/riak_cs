@@ -50,10 +50,11 @@
                 uuid :: binary(),
                 manifest :: lfs_manifest(),
                 riak_client :: riak_client(),
-                gc_worker_pid :: pid(),
-                %% Key in GC bucket which this manifest belongs to.
+                requester :: pid(),
+                %% For GC, Key in GC bucket which this manifest belongs to.
+                %% For active deletion, not used.
                 %% Set only once at init and unchanged. Used only for logs.
-                gc_key :: binary(),
+                request_meta_info :: binary(),
                 delete_blocks_remaining :: ordsets:ordset({binary(), integer()}),
                 unacked_deletes=ordsets:new() :: ordsets:ordset(integer()),
                 all_delete_workers=[] :: list(pid()),
@@ -80,7 +81,7 @@ block_deleted(Pid, Response) ->
 %% gen_fsm callbacks
 %% ====================================================================
 
-init([BagId, {UUID, Manifest}, GCWorkerPid, GCKey, _Options]) ->
+init([BagId, {UUID, Manifest}, RequesterPid, RequestMeta, _Options]) ->
     {Bucket, Key} = Manifest?MANIFEST.bkey,
     {ok, RcPid} = riak_cs_riak_client:checkout(),
     ok = riak_cs_riak_client:set_manifest_bag(RcPid, BagId),
@@ -90,8 +91,8 @@ init([BagId, {UUID, Manifest}, GCWorkerPid, GCKey, _Options]) ->
                    manifest=Manifest,
                    uuid=UUID,
                    riak_client=RcPid,
-                   gc_worker_pid=GCWorkerPid,
-                   gc_key=GCKey},
+                   requester=RequesterPid,
+                   request_meta_info=RequestMeta},
     {ok, prepare, State, 0}.
 
 %% @TODO Make sure we avoid any race conditions here
@@ -129,7 +130,7 @@ terminate(Reason, _StateName, #state{all_delete_workers=AllDeleteWorkers,
                                      riak_client=RcPid} = State) ->
     manifest_cleanup(ManifestState, Bucket, Key, UUID, RcPid),
     _ = [riak_cs_block_server:stop(P) || P <- AllDeleteWorkers],
-    notify_gc_worker(Reason, State),
+    notify_requester(Reason, State),
     ok.
 
 code_change(_OldVsn, StateName, State, _Extra) ->
@@ -169,7 +170,7 @@ deleting_state_result(_, State) ->
 -spec handle_receiving_manifest(state()) ->
     {next_state, atom(), state()} | {stop, normal, state()}.
 handle_receiving_manifest(State=#state{manifest=Manifest,
-                                       gc_key=GCKey}) ->
+                                       request_meta_info=RequestMeta}) ->
     case blocks_to_delete_from_manifest(Manifest) of
         {ok, {NewManifest, BlocksToDelete}} ->
             BlockCount = ordsets:size(BlocksToDelete),
@@ -181,7 +182,7 @@ handle_receiving_manifest(State=#state{manifest=Manifest,
             {Bucket, Key} = Manifest?MANIFEST.bkey,
             _ = lager:warning("Invalid state manifest in GC bucket at ~p, "
                               "bucket=~p key=~p: ~p",
-                              [GCKey, Bucket, Key, Manifest]),
+                              [RequestMeta, Bucket, Key, Manifest]),
             %% If total blocks and deleted blocks are the same,
             %% gc worker attempt to delete the manifest in fileset.
             %% Then manifests and blocks becomes orphan.
@@ -240,18 +241,23 @@ maybe_delete_blocks(State=#state{bucket=Bucket,
                                     free_deleters=NewFreeDeleters,
                                     delete_blocks_remaining=NewDeleteBlocksRemaining}).
 
--spec notify_gc_worker(term(), state()) -> term().
-notify_gc_worker(Reason, State) ->
-    gen_fsm:sync_send_event(State#state.gc_worker_pid,
+-spec notify_requester(term(), state()) -> term().
+notify_requester(Reason, State) ->
+    gen_fsm:sync_send_event(State#state.requester,
                             notification_msg(Reason, State),
                             infinity).
 
 -spec notification_msg(term(), state()) -> {pid(),
                                             {ok, {non_neg_integer(), non_neg_integer()}} |
                                             {error, term()}}.
-notification_msg(normal, #state{deleted_blocks = DeletedBlocks,
-                                total_blocks = TotalBlocks}) ->
-    {self(), {ok, {DeletedBlocks, TotalBlocks}}};
+notification_msg(normal, #state{
+                            bucket=Bucket,
+                            key=Key,
+                            uuid=UUID,
+                            deleted_blocks = DeletedBlocks,
+                            total_blocks = TotalBlocks}) ->
+    Reply = {ok, {Bucket, Key, UUID, DeletedBlocks, TotalBlocks}},
+    {self(), Reply};
 notification_msg(Reason, _State) ->
     {self(), {error, Reason}}.
 
